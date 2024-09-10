@@ -7,5 +7,6 @@ dependencies:
   - matplotlib
   - dash
   - dash-mantine-components
+  - plotly-resampler
   - pip:
     - nidaqmx
