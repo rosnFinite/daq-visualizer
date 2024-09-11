@@ -161,11 +161,18 @@ def write_to_file(filename, channels, sampling_rate, data_q):
             total_samples = 0
             while True:
                 samples = data_q.get()
+                # pair measured values for each channel into one element => e.g. 3 samples for 2 channels [[1,2,3],[4,5,6]] => [(1,4),(2,5),(3,6)]
+                if len(channels) > 1:
+                    samples = list(zip(*samples))
                 total_samples += len(samples)
                 for item in samples:
-                    csv_writer.writerow([timestamp, item])
+                    # in case measurements of multiple channels were paired
+                    if type(item) is tuple:
+                        csv_writer.writerow([timestamp, *item])
+                    else:
+                        csv_writer.writerow([timestamp, item])
                     timestamp += 1/sampling_rate
-                print(Fore.GREEN + "#samples: " + Style.RESET_ALL + f"{total_samples:<15}" + Fore.GREEN + 5 * " " +"file_size: " + Style.RESET_ALL + f"{os.stat(f'data/{filename}').st_size / (1024 * 1024):.2f} Mb" + Style.RESET_ALL)
+                print(Fore.GREEN + "#samples per channel: " + Style.RESET_ALL + f"{total_samples:<15}" + Fore.GREEN + 5 * " " +"file_size: " + Style.RESET_ALL + f"{os.stat(f'data/{filename}').st_size / (1024 * 1024):.2f} Mb" + Style.RESET_ALL)
     except KeyboardInterrupt:
         print("")
 
