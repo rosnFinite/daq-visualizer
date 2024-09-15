@@ -3,6 +3,7 @@ import csv
 import math
 import multiprocessing
 import os
+import sys
 
 import numpy as np
 import nidaqmx
@@ -46,6 +47,7 @@ class UniqueListAction(argparse.Action):
     >>> print(args.unique)
     ['a', 'b', 'c']
     """
+
     def __init__(self, option_strings, dest, nargs=None, **kwargs):
         if nargs is not None:
             raise ValueError("nargs not allowed")
@@ -67,43 +69,106 @@ parser = argparse.ArgumentParser(
 
 parser.add_argument("-t", "--task_name", dest="task_name", action="store", type=str,
                     default="AcquisitionTask",
-                    help="Name of the data reading task", required=False)
+                    help="Name of the data reading task (Default: 'AcquisitionTask')",
+                    required=False)
 parser.add_argument("-c", "--channel", dest="channels", action=UniqueListAction,
                     choices=["ai0", "ai1", "ai2", "ai3", "ai4", "ai5", "ai6", "ai7"],
                     help="Channel from which data is to be read (e.g. 'ai0'), multiple channels can be added by "
                          "providing the argument multiple times",
                     required=True)
-parser.add_argument("-tc", "--trigger_channel", dest="trigger_channel", action="store", type=str,
+parser.add_argument("-atc", "--analog_trigger_channel", dest="analog_trigger_channel", action="store",
+                    type=str,
+                    help="Analog channel used as reference trigger",
                     default=None,
                     choices=["ai0", "ai1", "ai2", "ai3", "ai4", "ai5", "ai6", "ai7"])
-parser.add_argument("-sr", "--sampling_rate", dest="sampling_rate", action="store", type=int,
+parser.add_argument("-dtc", "--digital_trigger_channel", dest="digital_trigger_channel", action="store",
+                    type=str,
+                    help="Digital channel used as reference trigger",
+                    default=None,
+                    choices=["pfi1", "pfi2", "pfi3", "pfi4", "pfi5", "pfi6", "pfi7"])
+parser.add_argument("-sr", "--sampling_rate", dest="sampling_rate", action="store",
+                    type=int,
                     help="Rate at which samples are read from provided channels (positive integer up to 1000000)",
                     required=True)
-parser.add_argument("-ns", "--number_of_samples", dest="number_of_samples", action="store", type=int,
+parser.add_argument("-ps", "--pretrigger_samples", dest="pretrigger_samples", action="store",
+                    help="Number of samples to be acquired before a trigger occurs. (Required when either analog or"
+                         "digital trigger channel was provided)")
+parser.add_argument("-ns", "--number_of_samples", dest="number_of_samples", action="store",
+                    type=int,
                     help="Number of samples to be read at once. If not provided all available samples will be read "
-                         "on read.", default=None)
-parser.add_argument("-v", "--visualize", dest="visualize", action="store_true", default=False,
-                    help="Live visualization of read data. Can be problematic for high sampling rate and number of "
-                         "samples to read! Default: False")
-parser.add_argument("-f", "--filename", dest="filename", action="store", type=str,
+                         "on read. In case a trigger channel was provided, this will describe the total amount of "
+                         "samples to be read including pretrigger_samples. Therefore number_of_samples should always be"
+                         "larger than pretrigger_samples", default=None)
+parser.add_argument("-f", "--filename", dest="filename", action="store",
+                    type=str,
                     default="measurements.csv",
                     help="Filename to which read data will be written (has to be a csv file) stored inside data "
-                         "folder. Default: measurements.csv")
+                         "folder. (Default: measurements.csv)")
 
 args = parser.parse_args()
 
+# check argument combination for validity
+if args.analog_trigger_channel is not None and args.digital_trigger_channel is not None:
+    sys.exit("An analog and digital trigger channel was provided. Please either provide an analog or an digital channel"
+             " but not both.")
+if args.analog_trigger_channel is not None or args.digital_trigger_channel is not None:
+    if args.number_of_samples < args.pretrigger_samples:
+        sys.exit("Total number of samples (-ns, --number_of_samples) to read is smaller than the amount of "
+                 "pretrigger_samples (-ps, --pretrigger_samples). Number of samples should at least be larger than "
+                 "amount of pretrigger samples.")
+
 
 def main_data_loop(data_q):
+    """
+    Main loop to collect and process data from a National Instruments (NI) data acquisition task.
+
+    This function sets up an analog input task, configures the acquisition timing and trigger settings,
+    and continuously reads data from the specified input channels. The acquired data is then pushed
+    to a queue for further processing. The loop runs indefinitely until interrupted (e.g., by KeyboardInterrupt).
+
+    Parameters
+    ----------
+    data_q : Queue
+        A queue object used to store the data read from the NI data acquisition task.
+
+    Notes
+    -----
+    The function uses `nidaqmx` to interface with NI DAQ hardware and assumes the configuration is passed
+    via a global `args` object, which should have the following attributes:
+        - task_name : str
+            The name of the NI task.
+        - channels : list
+            A list of input channel names (e.g., `ai0`, `ai1`).
+        - trigger_channel : str or None
+            The name of the trigger channel if used; otherwise, None.
+        - sampling_rate : int
+            The rate at which to sample data, in Hz.
+        - number_of_samples : int or None
+            The number of samples to read per channel per acquisition.
+
+    Raises
+    ------
+    KeyboardInterrupt
+        The loop runs indefinitely until interrupted, allowing for graceful task closure.
+
+    Example
+    -------
+    >>> q = Queue()
+    >>> main_data_loop(q)
+    """
     print("Starting " + Fore.BLUE + f"{args.task_name}" + Style.RESET_ALL)
     print("Input channels: " + Fore.BLUE + str(args.channels) + Style.RESET_ALL)
-    print("Trigger channel: " + Fore.BLUE + f"{args.trigger_channel if args.trigger_channel is not None else 'None'}" +
-          Style.RESET_ALL)
+    if args.analog_trigger_channel is not None:
+        print("Trigger channel: " + Fore.BLUE + f"{args.analog_trigger_channel}" + Style.RESET_ALL)
+    if args.digital_trigger_channel is not None:
+        print("Trigger channel: " + Fore.BLUE + f"{args.digital_trigger_channel}" + Style.RESET_AL)
     print("Sampling rate: " + Fore.BLUE + str(args.sampling_rate) + "Hz" + Style.RESET_ALL)
     if args.number_of_samples is None:
         print("Number of samples per read: " + Fore.BLUE +
               f"{'READ ALL' if args.trigger_channel is None else args.sampling_rate}" + Style.RESET_ALL)
     else:
         print("Number of samples per read: " + Fore.BLUE + str(args.number_of_samples) + Style.RESET_ALL)
+
     # creating task
     in_task = nidaqmx.task.Task(new_task_name=args.task_name)
     for channel in args.channels:
@@ -116,11 +181,25 @@ def main_data_loop(data_q):
 
     # setting reference signal for analog input task
     if args.trigger_channel is not None:
+        # set in_task.triggers.retriggerable = True, so that after collecting num_samples the task wont complain about
+        # already consuming num_samples.
+        # task.trigger.reference_trigger.retriggerable
         in_task.triggers.reference_trigger.cfg_anlg_edge_ref_trig(
             trigger_source=f"/Dev1/{args.trigger_channel}",
             pretrigger_samples=args.number_of_samples
         )
     in_task.start()
+
+    # in case of:
+    # Warning 200010 occurred.
+    #
+    # Finite acquisition or generation has been stopped before the requested number of samples were acquired or generated.
+    #   error_buffer.value.decode("utf-8"), error_code))
+    # can safely be ignored
+
+    # USB-6366 should support retrigger
+    # https://shop.cnrood.com/782263-01#:~:text=Onboard%20NI%2DSTC3%20timing%20and,engines%20and%20retriggerable%20measurement%20tasks.
+    # https://www.artisantg.com/info/National_Instruments_PCIe_6323_Manual_2018115104919.pdf?srsltid=AfmBOopJpR58UNMqyJm2SnMXKIjdY0ayatv3sF3niD6Wwl6XH6p9sK71
 
     try:
         while True:
@@ -138,7 +217,7 @@ def main_data_loop(data_q):
 
 
 def write_to_file(filename, channels, sampling_rate, data_q):
-    print("Saving samples in"+ Fore.RED +  f"'data/{filename}" + Style.RESET_ALL)
+    print("Saving samples in " + Fore.RED + f"data/{filename}" + Style.RESET_ALL)
     try:
         with open(f"data/{filename}", "w+", newline="") as f:
             csv_writer = csv.writer(f)
