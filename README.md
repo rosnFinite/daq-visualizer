@@ -36,7 +36,7 @@ This tool is useful for tasks that involve reading analog signals and storing da
 To install the required Python packages, use the provided `environment.yml` to create a conda environment:
 
 ```bash
-conda create -f environment.yml
+conda env create -f environment.yml
 ```
 
 Ensure that the NI-DAQmx driver is installed on your system to interact with the DAQ device.
