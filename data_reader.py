@@ -76,29 +76,20 @@ parser.add_argument("-c", "--channel", dest="channels", action=UniqueListAction,
                     help="Channel from which data is to be read (e.g. 'ai0'), multiple channels can be added by "
                          "providing the argument multiple times",
                     required=True)
-parser.add_argument("-atc", "--analog_trigger_channel", dest="analog_trigger_channel", action="store",
+parser.add_argument("-tc", "--trigger_channel", dest="trigger_channel", action="store",
                     type=str,
-                    help="Analog channel used as reference trigger",
+                    help="Analog or digitial channel used as reference trigger",
                     default=None,
-                    choices=["ai0", "ai1", "ai2", "ai3", "ai4", "ai5", "ai6", "ai7"])
-parser.add_argument("-dtc", "--digital_trigger_channel", dest="digital_trigger_channel", action="store",
-                    type=str,
-                    help="Digital channel used as reference trigger",
-                    default=None,
-                    choices=["pfi1", "pfi2", "pfi3", "pfi4", "pfi5", "pfi6", "pfi7"])
+                    choices=["ai0", "ai1", "ai2", "ai3", "ai4", "ai5", "ai6", "ai7", "pfi0", "pfi1", "pfi2", "pfi3", "pfi4", "pfi5", "pfi6", "pfi7"])
 parser.add_argument("-sr", "--sampling_rate", dest="sampling_rate", action="store",
                     type=int,
                     help="Rate at which samples are read from provided channels (positive integer up to 1000000)",
                     required=True)
-parser.add_argument("-ps", "--pretrigger_samples", dest="pretrigger_samples", action="store",
-                    help="Number of samples to be acquired before a trigger occurs. (Required when either analog or"
-                         "digital trigger channel was provided)")
 parser.add_argument("-ns", "--number_of_samples", dest="number_of_samples", action="store",
                     type=int,
                     help="Number of samples to be read at once. If not provided all available samples will be read "
-                         "on read. In case a trigger channel was provided, this will describe the total amount of "
-                         "samples to be read including pretrigger_samples. Therefore number_of_samples should always be"
-                         "larger than pretrigger_samples", default=None)
+                         "on read. In case a trigger channel was provided, this will describe the amount of pretrigger "
+                         "samples to be read including 2 post trigger samples.", default=None)
 parser.add_argument("-f", "--filename", dest="filename", action="store",
                     type=str,
                     default="measurements.csv",
@@ -106,16 +97,6 @@ parser.add_argument("-f", "--filename", dest="filename", action="store",
                          "folder. (Default: measurements.csv)")
 
 args = parser.parse_args()
-
-# check argument combination for validity
-if args.analog_trigger_channel is not None and args.digital_trigger_channel is not None:
-    sys.exit("An analog and digital trigger channel was provided. Please either provide an analog or an digital channel"
-             " but not both.")
-if args.analog_trigger_channel is not None or args.digital_trigger_channel is not None:
-    if args.number_of_samples < args.pretrigger_samples:
-        sys.exit("Total number of samples (-ns, --number_of_samples) to read is smaller than the amount of "
-                 "pretrigger_samples (-ps, --pretrigger_samples). Number of samples should at least be larger than "
-                 "amount of pretrigger samples.")
 
 
 def main_data_loop(data_q):
@@ -158,10 +139,8 @@ def main_data_loop(data_q):
     """
     print("Starting " + Fore.BLUE + f"{args.task_name}" + Style.RESET_ALL)
     print("Input channels: " + Fore.BLUE + str(args.channels) + Style.RESET_ALL)
-    if args.analog_trigger_channel is not None:
-        print("Trigger channel: " + Fore.BLUE + f"{args.analog_trigger_channel}" + Style.RESET_ALL)
-    if args.digital_trigger_channel is not None:
-        print("Trigger channel: " + Fore.BLUE + f"{args.digital_trigger_channel}" + Style.RESET_AL)
+    if args.trigger_channel is not None:
+        print("Trigger channel: " + Fore.BLUE + f"{args.trigger_channel}" + Style.RESET_ALL)
     print("Sampling rate: " + Fore.BLUE + str(args.sampling_rate) + "Hz" + Style.RESET_ALL)
     if args.number_of_samples is None:
         print("Number of samples per read: " + Fore.BLUE +
@@ -175,20 +154,31 @@ def main_data_loop(data_q):
         in_task.ai_channels.add_ai_voltage_chan(f"/Dev1/{channel}")
     in_task.timing.cfg_samp_clk_timing(
         rate=args.sampling_rate,
-        sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
-        samps_per_chan=args.number_of_samples
+        sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS if args.trigger_channel is None else nidaqmx.constants.AcquisitionType.FINITE,
+        samps_per_chan=args.number_of_samples if args.trigger_channel is None else args.number_of_samples + 2
     )
 
-    # setting reference signal for analog input task
-    if args.trigger_channel is not None:
-        # set in_task.triggers.retriggerable = True, so that after collecting num_samples the task wont complain about
-        # already consuming num_samples.
-        # task.trigger.reference_trigger.retriggerable
-        in_task.triggers.reference_trigger.cfg_anlg_edge_ref_trig(
-            trigger_source=f"/Dev1/{args.trigger_channel}",
-            pretrigger_samples=args.number_of_samples
-        )
-    in_task.start()
+    # setting reference signal (ANALOG TRIGGER) for analog input task
+    try:
+        if args.trigger_channel is not None:
+            # set in_task.triggers.retriggerable = True, so that after collecting num_samples the task wont complain about
+            # already consuming num_samples.
+            # task.trigger.reference_trigger.retriggerable
+            if args.trigger_channel.startswith("ai"):
+                in_task.triggers.reference_trigger.cfg_anlg_edge_ref_trig(
+                    trigger_source=f"Dev1/{args.trigger_channel}",
+                    trigger_level=0.1,
+                    pretrigger_samples=args.number_of_samples
+                )
+            else:
+                in_task.triggers.reference_trigger.cfg_dig_edge_ref_trig(
+                trigger_source=f"Dev1/{args.trigger_channel}",
+                pretrigger_samples=args.number_of_samples
+            )
+        in_task.start()
+    except Exception as e:
+        print(e)
+        in_task.close()  
 
     # in case of:
     # Warning 200010 occurred.
@@ -257,4 +247,6 @@ if __name__ == "__main__":
     write_process.start()
 
     main_data_loop(data_q)
+        
     write_process.join()
+    print(Fore.BLUE + "Finished process" + Style.RESET_ALL)
