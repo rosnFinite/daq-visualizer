@@ -81,6 +81,12 @@ parser.add_argument("-tc", "--trigger_channel", dest="trigger_channel", action="
                     help="Analog or digitial channel used as reference trigger",
                     default=None,
                     choices=["ai0", "ai1", "ai2", "ai3", "ai4", "ai5", "ai6", "ai7", "pfi0", "pfi1", "pfi2", "pfi3", "pfi4", "pfi5", "pfi6", "pfi7"])
+parser.add_argument("-ts", "--trigger_slope", dest="trigger_slope", type=str,
+                    help="Specifies on which slope of the signal the Reference Trigger occurs.",
+                    default="RISING",
+                    choices=["RISING", "FALLING"])
+parser.add_argument("-tl", "--trigger_level", dest="trigger_level", type=float,
+                    help="Specifies at what threshold to trigger. Specify this value in the units of the measurement.")
 parser.add_argument("-sr", "--sampling_rate", dest="sampling_rate", action="store",
                     type=int,
                     help="Rate at which samples are read from provided channels (positive integer up to 1000000)",
@@ -93,11 +99,33 @@ parser.add_argument("-ns", "--number_of_samples", dest="number_of_samples", acti
 parser.add_argument("-f", "--filename", dest="filename", action="store",
                     type=str,
                     default="measurements.csv",
-                    help="Filename to which read data will be written (has to be a csv file) stored inside data "
-                         "folder. (Default: measurements.csv)")
+                    help="Filename to which read data will be written (has to be a csv file) stored inside data/ "
+                         "folder. In case a trigger channel is provided each triggered data acquisition will store "
+                         "file with defined name and an increasing version as suffix. (Default: measurements.csv)")
 
 args = parser.parse_args()
 
+# check if filename already exists
+def check_file_name():
+    if os.path.exists(os.path.join("data", args.filename)):
+        print(Fore.YELLOW + f"File '{args.filename}' does already exist inside data/" + Style.RESET_ALL)
+        valid_answer = False
+        while not valid_answer:
+            confirmed = input("Would you like to overwrite it? [y/n] ")
+            if confirmed.casefold() == "y" or confirmed.casefold() == "n":
+                valid_answer = True
+        if confirmed.casefold() == "y":
+            return
+        valid_answer = False
+        while not valid_answer:
+            new_filename = input("New file name: ")
+            if len(new_filename.split(".")) == 1:
+                args.filename = new_filename + ".csv"
+                valid_answer = True
+            if len(new_filename.split(".")) == 2 and new_filename.endswith(".csv"):
+                args.filename = new_filename
+                valid_answer = True
+        
 
 def main_data_loop(data_q):
     """
@@ -145,6 +173,8 @@ def main_data_loop(data_q):
     if args.number_of_samples is None:
         print("Number of samples per read: " + Fore.BLUE +
               f"{'READ ALL' if args.trigger_channel is None else args.sampling_rate}" + Style.RESET_ALL)
+    if args.trigger_channel is not None:
+        print("Number of samples per read: " + Fore.BLUE + str(args.number_of_samples) + " + 2 post trigger" + Style.RESET_ALL)
     else:
         print("Number of samples per read: " + Fore.BLUE + str(args.number_of_samples) + Style.RESET_ALL)
 
@@ -167,12 +197,14 @@ def main_data_loop(data_q):
             if args.trigger_channel.startswith("ai"):
                 in_task.triggers.reference_trigger.cfg_anlg_edge_ref_trig(
                     trigger_source=f"Dev1/{args.trigger_channel}",
-                    trigger_level=0.1,
+                    trigger_level=args.trigger_level,
+                    trigger_slope=nidaqmx.constants.Slope.RISING if args.trigger_slope == "RISING" else nidaqmx.constants.Slope.FALLING,
                     pretrigger_samples=args.number_of_samples
                 )
             else:
                 in_task.triggers.reference_trigger.cfg_dig_edge_ref_trig(
                 trigger_source=f"Dev1/{args.trigger_channel}",
+                trigger_edge=nidaqmx.constants.Edge.RISING if args.trigger_slope == "RISING" else nidaqmx.constants.Edge.FALLING,
                 pretrigger_samples=args.number_of_samples
             )
         in_task.start()
@@ -197,7 +229,7 @@ def main_data_loop(data_q):
             if in_task.in_stream.avail_samp_per_chan == 0:
                 continue
             if args.trigger_channel is None:
-                data = in_task.read(number_of_samples_per_channel=args.number_of_samples)
+                data = in_task.read(number_of_samples_per_channel=args.number_of_samples + 2)
             else:
                 data = in_task.read(number_of_samples_per_channel=args.number_of_samples,
                                     timeout=nidaqmx.constants.WAIT_INFINITELY)
@@ -206,13 +238,13 @@ def main_data_loop(data_q):
         in_task.close()
 
 
-def write_to_file(filename, channels, sampling_rate, data_q):
-    print("Saving samples in " + Fore.RED + f"data/{filename}" + Style.RESET_ALL)
+def write_to_file(cli_arguments, data_q):
+    print("Saving samples in " + Fore.RED + f"data/{cli_arguments.filename}" + Style.RESET_ALL)
     try:
-        with open(f"data/{filename}", "w+", newline="") as f:
+        with open(f"data/{cli_arguments.filename}", "w+", newline="") as f:
             csv_writer = csv.writer(f)
             header = ["time"]
-            header.extend(channels)
+            header.extend(cli_arguments.channels)
             # csv header
             csv_writer.writerow(header)
             timestamp = 0
@@ -221,7 +253,7 @@ def write_to_file(filename, channels, sampling_rate, data_q):
                 samples = data_q.get()
                 # pair measured values for each channel into one element => e.g. 3 samples for 2 channels
                 # [[1,2,3],[4,5,6]] => [(1,4),(2,5),(3,6)]
-                if len(channels) > 1:
+                if len(cli_arguments.channels) > 1:
                     samples = list(zip(*samples))
                 total_samples += len(samples)
                 for item in samples:
@@ -230,20 +262,21 @@ def write_to_file(filename, channels, sampling_rate, data_q):
                         csv_writer.writerow([timestamp, *item])
                     else:
                         csv_writer.writerow([timestamp, item])
-                    timestamp += 1 / sampling_rate
+                    timestamp += 1 / cli_arguments.sampling_rate
                 print(
                     Fore.GREEN + "#samples per channel: " + Style.RESET_ALL + f"{total_samples:<15}" + Fore.GREEN +
                     5 * " " + "file_size: " + Style.RESET_ALL +
-                    f"{os.stat(f'data/{filename}').st_size / (1024 * 1024):.2f} Mb" + Style.RESET_ALL)
+                    f"{os.stat(f'data/{args.filename}').st_size / (1024 * 1024):.2f} Mb" + Style.RESET_ALL)
     except KeyboardInterrupt:
         print("")
 
 
 if __name__ == "__main__":
+    check_file_name()
     data_q = multiprocessing.Queue()
 
     write_process = multiprocessing.Process(target=write_to_file,
-                                            args=(args.filename, args.channels, args.sampling_rate, data_q,))
+                                            args=(args, data_q,))
     write_process.start()
 
     main_data_loop(data_q)
